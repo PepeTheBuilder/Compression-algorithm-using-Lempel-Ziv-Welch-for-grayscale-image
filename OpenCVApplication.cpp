@@ -5,26 +5,28 @@
 #include <opencv2/opencv.hpp>
 #include <unordered_map>
 #include <fstream>
+#include <bitset>
+#include <cmath>
 
 using namespace std;
 using namespace cv;
 
-// gri1.jpg <-> gri4.jpg or 1<->13.bmp or Onegray.png
-constexpr auto PATH_IMG = "Images/gri/Onegray.png";
+// gri1.bmp <-> gri4.bmp or 1<->13.bmp or Onegray.bmp
+constexpr auto PATH_IMG = "Images/gri/gri3.bmp";
 constexpr auto PATH_FILE = "compressed_data.bin";
+constexpr auto PATH_FILE2 = "compressed_data2.bin";
 
 vector<int> compressLZW(const Mat_<uchar>& image) {
     unordered_map<string, int> dictionary;
     vector<int> compressedData;
-
-    for (int i = 0; i < 256; ++i) {
+    for (int i = 0; i < 256; i++) {
         dictionary[string(1, (uchar)i)] = i;
     }
 
     string currentString;
-    for (int y = 0; y < image.rows; ++y) {
-        for (int x = 0; x < image.cols; ++x) {
-            uchar pixel = image(y, x);
+    for (int x = 0; x < image.rows; x++) {
+        for (int y = 0; y < image.cols; y++) {
+            uchar pixel = image(x, y);
             string nextString = currentString + (char)pixel;
             if (dictionary.find(nextString) != dictionary.end()) {
                 currentString = nextString;
@@ -39,15 +41,76 @@ vector<int> compressLZW(const Mat_<uchar>& image) {
     if (!currentString.empty()) {
         compressedData.push_back(dictionary[currentString]);
     }
-
     return compressedData;
+}
+
+vector<uint8_t> compressBinary(const vector<int>& compressedData) {
+    int maxValue = *max_element(compressedData.begin(), compressedData.end());
+    int bitsRequired = ceil(log2(maxValue + 1));
+
+    vector<uint8_t> binaryData;
+    int bitBuffer = 0;
+    int bitCount = 0;
+
+    for (int value : compressedData) {
+        bitBuffer = (bitBuffer << bitsRequired) | value;
+        bitCount += bitsRequired;
+
+        while (bitCount >= 8) {
+            bitCount -= 8;
+            binaryData.push_back((bitBuffer >> bitCount) & 0xFF);
+        }
+    }
+
+    if (bitCount > 0) {
+        binaryData.push_back((bitBuffer << (8 - bitCount)) & 0xFF);
+    }
+
+    return binaryData;
+}
+
+void writeBinaryFile(const string& filename, const vector<uint8_t>& binaryData, int bitsRequired) {
+    ofstream outFile(filename, ios::binary);
+
+    outFile.write(reinterpret_cast<const char*>(&bitsRequired), sizeof(bitsRequired));
+
+    outFile.write(reinterpret_cast<const char*>(binaryData.data()), binaryData.size());
+
+    outFile.close();
+}
+
+vector<int> readBinaryFile(const string& filename) {
+    ifstream inFile(filename, ios::binary);
+
+    int bitsRequired;
+    inFile.read(reinterpret_cast<char*>(&bitsRequired), sizeof(bitsRequired));
+
+    vector<uint8_t> binaryData((istreambuf_iterator<char>(inFile)), istreambuf_iterator<char>());
+
+    inFile.close();
+
+    vector<int> decompressedData;
+    int bitBuffer = 0;
+    int bitCount = 0;
+
+    for (uint8_t byte : binaryData) {
+        bitBuffer = (bitBuffer << 8) | byte;
+        bitCount += 8;
+
+        while (bitCount >= bitsRequired) {
+            bitCount -= bitsRequired;
+            int value = (bitBuffer >> bitCount) & ((1 << bitsRequired) - 1);
+            decompressedData.push_back(value);
+        }
+    }
+
+    return decompressedData;
 }
 
 Mat_<uchar> decompressLZW(const vector<int>& compressedData, int width, int height) {
     unordered_map<int, string> dictionary;
     vector<uchar> decompressedData;
 
-    // Initialize dictionary with grayscale pixel values
     for (int i = 0; i < 256; ++i) {
         dictionary[i] = string(1, (uchar)i);
     }
@@ -73,12 +136,12 @@ Mat_<uchar> decompressLZW(const vector<int>& compressedData, int width, int heig
 
     Mat_<uchar> decompressedImage(height, width);
     auto it = decompressedData.begin();
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
+    for (int x = 0; x < height; x++) {
+        for (int y = 0; y < width; y++) {
             if (it == decompressedData.end()) {
                 throw runtime_error("Decompressed data size mismatch");
             }
-            decompressedImage(y, x) = *it++;
+            decompressedImage(x, y) = *it++;
         }
     }
 
@@ -98,26 +161,23 @@ void saveCompressedData(const vector<int>& compressedData, const string& filenam
     }
 }
 
-vector<int> loadCompressedData(const string& filename) {
-    vector<int> compressedData;
-    ifstream file(filename, ios::binary);
-    if (file.is_open()) {
-        int code;
-        while (file.read(reinterpret_cast<char*>(&code), sizeof(code))) {
-            compressedData.push_back(code);
-        }
-        file.close();
-    }
-    else {
-        cerr << "Unable to open file for reading: " << filename << endl;
-    }
-    return compressedData;
+long getFileSize(const string& filename) {
+    ifstream inFile(filename, ios::binary | ios::ate);
+    return inFile.tellg();
 }
 
-double calculateCompressionRatio(const Mat& original, const vector<int>& compressedData) {
-    int originalSize = original.rows * original.cols;
-    int compressedSize = compressedData.size();
-    return static_cast<double>(originalSize) / static_cast<double>(compressedSize);
+double compressRatio(const string& imagePath, const string& binaryPath) {
+    long originalSize = getFileSize(imagePath);
+
+    long compressedSize = getFileSize(binaryPath);
+
+    if (compressedSize == 0) {
+        cerr << "compressed file size is zero, cannot calculate compression ratio." << endl;
+        return 0;
+    }
+
+    double ratio = originalSize / double(compressedSize);
+    return ratio;
 }
 
 int countDifferentPixels(const Mat& image1, const Mat& image2) {
@@ -126,9 +186,9 @@ int countDifferentPixels(const Mat& image1, const Mat& image2) {
     }
 
     int differentPixels = 0;
-    for (int y = 0; y < image1.rows; ++y) {
-        for (int x = 0; x < image1.cols; ++x) {
-            if (image1.at<uchar>(y, x) != image2.at<uchar>(y, x)) {
+    for (int x = 0; x < image1.rows; x++) {
+        for (int y = 0; y < image1.cols; y++) {
+            if (image1.at<uchar>(x, y) != image2.at<uchar>(x, y)) {
                 ++differentPixels;
             }
         }
@@ -145,30 +205,27 @@ int main() {
         return -1;
     }
 
-    // Compress image
     vector<int> compressedData = compressLZW(image);
 
-    // Save compressed data to binary file
-    saveCompressedData(compressedData, PATH_FILE);
+    vector<uint8_t> binaryData = compressBinary(compressedData);
 
-    // Load compressed data from file
-    vector<int> loadedData = loadCompressedData(PATH_FILE);
+    int maxValue = *max_element(compressedData.begin(), compressedData.end());
+    int bitsRequired = ceil(log2(maxValue ));
 
-    // Decompress data
+    writeBinaryFile(PATH_FILE, binaryData, bitsRequired);
+
+    //the old way of writing the data (the hole integer)
+    saveCompressedData(compressedData, PATH_FILE2);
+
+    vector<int> loadedData = readBinaryFile(PATH_FILE);
     Mat decompressedImage = decompressLZW(loadedData, image.cols, image.rows);
 
-    // Calculate compression ratio
-    double compressionRatio = calculateCompressionRatio(image, compressedData);
-    cout << "Compression ratio: " << compressionRatio << '\n';
+    cout << "Compression ratio: " << compressRatio(PATH_IMG, PATH_FILE) << '\n'; //
+    cout << "Different pixels = " << countDifferentPixels(image, decompressedImage) << '\n';
 
-
-    image = imread(PATH_IMG, IMREAD_GRAYSCALE);
     imshow("original", image);
     imshow("decompressed", decompressedImage);
     waitKey();
 
-    cout << "Different pixels = " << countDifferentPixels(image, decompressedImage)<< '\n';
-
     return 0;
 }
-
